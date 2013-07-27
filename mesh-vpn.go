@@ -25,6 +25,12 @@ type Frame struct {
   Data []byte
 }
 
+type Peer struct {
+  Addr *net.UDPAddr
+}
+
+type Peers map[string]Peer
+
 func (eth *Ethernet) DecodeFromBytes(data []byte) error {
   if len(data) < 14 {
     return errors.New("Ethernet packet too small")
@@ -144,7 +150,7 @@ func main() {
 
   go ReadUDP(Conn, proc)
 
-  var peer_addr *net.UDPAddr = nil
+  peers := make(Peers)
 
   if len(os.Args) == 4 {
     Port := os.Args[3]
@@ -155,7 +161,7 @@ func main() {
       panic("Unable to resolve host")
     }
 
-    peer_addr = addr
+    peers[addr.String()] = Peer { addr }
   }
 
   fmt.Println("Going into frame processing loop\n")
@@ -166,7 +172,12 @@ func main() {
     frame := <- proc
 
     if frame.Input {
-      peer_addr = frame.From
+      _, ok := peers[frame.From.String()]
+
+      if !ok {
+        fmt.Println("New peer!")
+        peers[frame.From.String()] = Peer { frame.From }
+      }
 
       pkt := tuntap.Packet{}
       pkt.Protocol = 0x8000
@@ -174,8 +185,10 @@ func main() {
       pkt.Packet = frame.Data
 
       tun.WritePacket(&pkt)
-    } else if peer_addr != nil {
-      Conn.WriteMsgUDP(frame.Data, nil, peer_addr)
+    } else if len(peers) > 0 {
+      for _, peer := range peers {
+        Conn.WriteMsgUDP(frame.Data, nil, peer.Addr)
+      }
     } else {
       fmt.Println("No one to send these frames to!")
     }
