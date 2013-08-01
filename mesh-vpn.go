@@ -5,15 +5,17 @@ import (
 	"code.google.com/p/tuntap"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/evanphx/go-crypto-dh/dh"
 	"net"
-	"os"
+	"os/exec"
 )
 
 type Ethernet struct {
@@ -35,14 +37,20 @@ type Frame struct {
 type Peer struct {
 	Addr *net.UDPAddr
 
+	Negotiated bool
+
 	PrivKey *dh.PrivateKey
 	PubKey  *dh.SlimPublicKey
 	Secret  *dh.Secret
 
 	Key, IV []byte
+	MacKey  []byte
+	MacLen  int
 
 	Block  cipher.Block
 	Stream cipher.Stream
+
+	SeqIn, SeqOut uint32
 }
 
 type Peers map[string]*Peer
@@ -130,6 +138,7 @@ func ReadDevice(tun *tuntap.Interface, proc chan *Frame) {
 var defaultGroup = dh.Group14
 var keyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn")
 var IVkeyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-IV")
+var macInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-mac")
 
 type negotiationData struct {
 	Key dh.SlimPublicKey
@@ -198,6 +207,8 @@ func readNegotiate(frame *Frame, peer *Peer) bool {
 	peer.PubKey = &data.Key
 	peer.Secret = peer.PubKey.ComputeSecret(peer.PrivKey)
 	peer.Key = peer.Secret.DeriveKey(sha256.New, 32, keyInfo)
+	peer.MacLen = sha256.New().Size()
+	peer.MacKey = peer.Secret.DeriveKey(sha256.New, peer.MacLen, macInfo)
 
 	peer.Block, err = aes.NewCipher(peer.Key)
 
@@ -208,47 +219,90 @@ func readNegotiate(frame *Frame, peer *Peer) bool {
 	peer.IV = peer.Secret.DeriveKey(sha256.New, peer.Block.BlockSize(), IVkeyInfo)
 	peer.Stream = cipher.NewCTR(peer.Block, peer.IV)
 
-	fmt.Printf("key: %x\n", peer.Key)
+	peer.Negotiated = true
 
 	return reply
 }
 
 func (peer *Peer) Encrypt(dst, src []byte) []byte {
-	peer.Stream.XORKeyStream(dst, src)
+	var seq [4]byte
+	binary.BigEndian.PutUint32(seq[:], peer.SeqOut)
+
+	mac := hmac.New(sha256.New, peer.MacKey)
+
+	mac.Write(seq[:])
+	mac.Write(src)
+
+	om := mac.Sum(nil)
+
+	copy(dst, om)
+
+	peer.Stream.XORKeyStream(dst[len(om):], src)
+
+	peer.SeqOut++
 	return dst
 }
 
 func (peer *Peer) Decrypt(data []byte) []byte {
-	peer.Stream.XORKeyStream(data, data)
-	return data
+	mac := hmac.New(sha256.New, peer.MacKey)
+
+	payload := data[mac.Size():]
+
+	peer.Stream.XORKeyStream(payload, payload)
+
+	var seq [4]byte
+	binary.BigEndian.PutUint32(seq[:], peer.SeqIn)
+
+	mac.Write(seq[:])
+	mac.Write(payload)
+
+	om := mac.Sum(nil)
+
+	check := data[:mac.Size()]
+
+	peer.SeqIn++
+
+	if !bytes.Equal(om, check) {
+		return nil
+	}
+
+	return payload
 }
 
+var deviceName = flag.String("device", "tap0", "device name to create")
+var peerArg = flag.String("peer", "", "peer to connect to")
+var ipArg = flag.String("ip", "", "IP to assign to device")
+
 func main() {
-	fmt.Printf("hello here\n")
+	flag.Parse()
 
-	if len(os.Args) < 3 {
-		fmt.Println("syntax:", os.Args[0], "tun|tap", "<device name>", "<port>")
-		return
-	}
-
-	var typ tuntap.DevKind
-	switch os.Args[1] {
-	case "tun":
-		typ = tuntap.DevTun
-	case "tap":
-		typ = tuntap.DevTap
-	default:
-		fmt.Println("Unknown device type", os.Args[1])
-		return
-	}
-
-	tun, err := tuntap.Open(os.Args[2], typ)
+	tun, err := tuntap.Open(*deviceName, tuntap.DevTap)
 	if err != nil {
 		fmt.Println("Error opening tun/tap device:", err)
 		return
 	}
 
-	fmt.Println("Listening on", tun.Name())
+	if len(*ipArg) > 0 {
+		fmt.Printf("ip=%s, dev=%s\n", *ipArg, tun.Name())
+
+		cmd := exec.Command("ip", "link", "set", *deviceName, "up")
+		err = cmd.Run()
+
+		if err != nil {
+			panic(err)
+		}
+
+		cmd = exec.Command("ip", "addr", "add", *ipArg, "dev", *deviceName)
+		err = cmd.Run()
+
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Listening on %s as %s\n", tun.Name(), *ipArg)
+	} else {
+		fmt.Println("Listening on", tun.Name())
+	}
 
 	proc := make(chan *Frame)
 
@@ -264,10 +318,8 @@ func main() {
 
 	peers := make(Peers)
 
-	if len(os.Args) == 4 {
-		Port := os.Args[3]
-
-		addr, err := net.ResolveUDPAddr("udp4", Port)
+	if len(*peerArg) > 0 {
+		addr, err := net.ResolveUDPAddr("udp4", *peerArg)
 
 		if err != nil {
 			panic("Unable to resolve host")
@@ -275,6 +327,7 @@ func main() {
 
 		peer := new(Peer)
 		peer.Addr = addr
+		peer.Negotiated = false
 
 		peers[addr.String()] = peer
 
@@ -295,6 +348,7 @@ func main() {
 				fmt.Println("New peer!")
 				peer = new(Peer)
 				peer.Addr = frame.From
+				peer.Negotiated = false
 
 				peers[frame.From.String()] = peer
 			}
@@ -311,16 +365,25 @@ func main() {
 				pkt := tuntap.Packet{}
 				pkt.Protocol = 0x8000
 				pkt.Truncated = false
+
 				pkt.Packet = peer.Decrypt(frame.Data[1:])
 
-				tun.WritePacket(&pkt)
+				if pkt.Packet != nil {
+					tun.WritePacket(&pkt)
+				} else {
+					fmt.Println("Failed to decrypt and authenticated packet")
+				}
 			default:
 				fmt.Printf("Invalid command: %x\n", frame.Data[0])
 			}
 
 		} else if len(peers) > 0 {
 			for _, peer := range peers {
-				buf := make([]byte, len(frame.Data)+1)
+				if !peer.Negotiated {
+					continue
+				}
+
+				buf := make([]byte, len(frame.Data)+peer.MacLen+1)
 				buf[0] = 1
 				peer.Encrypt(buf[1:], frame.Data)
 
