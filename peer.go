@@ -170,11 +170,6 @@ func (peer *Peer) Encrypt(src []byte) []byte {
 
 	stream := cipher.NewCTR(peer.Block, peer.OIV)
 
-	// h := sha256.New()
-	// h.Write(src)
-
-	// Debugf("enc: %x", h.Sum(nil))
-
 	stream.XORKeyStream(payload[4:], src)
 
 	mac := hmac.New(sha256.New, peer.MacKey)
@@ -228,11 +223,6 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 	stream := cipher.NewCTR(peer.Block, peer.IIV)
 
 	stream.XORKeyStream(payload[4:], payload[4:])
-
-	// h := sha256.New()
-	// h.Write(payload[4:])
-
-	// Debugf("dec: %x", h.Sum(nil))
 
 	peer.SeqIn++
 
