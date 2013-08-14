@@ -161,22 +161,14 @@ func main() {
 			routingKey := frame.DestKey()
 
 			if peer, ok := routes[routingKey]; ok {
-				buf := make([]byte, len(frame.Data)+peer.MacLen+1)
-				buf[0] = 1
-				peer.Encrypt(buf[1:], frame.Data)
-
-				Conn.WriteMsgUDP(buf, nil, peer.Addr)
+				Conn.WriteMsgUDP(peer.Encrypt(frame.Data), nil, peer.Addr)
 			} else {
 				for _, peer := range peers {
 					if !peer.Negotiated {
 						continue
 					}
 
-					buf := make([]byte, len(frame.Data)+peer.MacLen+1)
-					buf[0] = 1
-					peer.Encrypt(buf[1:], frame.Data)
-
-					Conn.WriteMsgUDP(buf, nil, peer.Addr)
+					Conn.WriteMsgUDP(peer.Encrypt(frame.Data), nil, peer.Addr)
 				}
 			}
 		}
