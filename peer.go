@@ -30,8 +30,13 @@ type Peer struct {
 	MacKey  []byte
 	MacLen  int
 
-	Block  cipher.Block
-	Stream cipher.Stream
+	Block cipher.Block
+
+	IIV []byte
+	OIV []byte
+
+	IStream cipher.Stream
+	OStream cipher.Stream
 
 	SeqIn, SeqOut uint32
 }
@@ -86,6 +91,22 @@ func (peer *Peer) makeNegotiate() []byte {
 	return buf.Bytes()
 }
 
+func dup(p []byte) []byte {
+	q := make([]byte, len(p))
+	copy(q, p)
+	return q
+}
+
+func inc(p []byte) {
+	for i := 0; i < len(p); i++ {
+		p[i]++
+
+		if (p[i]) != 0 {
+			break
+		}
+	}
+}
+
 func (peer *Peer) readNegotiate(frame *Frame) bool {
 	var buf bytes.Buffer
 
@@ -134,7 +155,11 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 	}
 
 	peer.IV = peer.Secret.DeriveKey(sha256.New, peer.Block.BlockSize(), IVkeyInfo)
-	peer.Stream = cipher.NewCTR(peer.Block, peer.IV)
+	peer.IStream = cipher.NewCTR(peer.Block, peer.IV)
+	peer.OStream = cipher.NewCTR(peer.Block, peer.IV)
+
+	peer.IIV = dup(peer.IV)
+	peer.OIV = dup(peer.IV)
 
 	peer.Negotiated = true
 
@@ -154,9 +179,14 @@ func (peer *Peer) Encrypt(dst, src []byte) []byte {
 
 	copy(dst, om)
 
-	peer.Stream.XORKeyStream(dst[len(om):], src)
+	peer.OStream = cipher.NewCTR(peer.Block, peer.OIV)
+
+	peer.OStream.XORKeyStream(dst[len(om):], src)
 
 	peer.SeqOut++
+
+	inc(peer.OIV)
+
 	return dst
 }
 
@@ -165,7 +195,9 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 
 	payload := data[mac.Size():]
 
-	peer.Stream.XORKeyStream(payload, payload)
+	peer.IStream = cipher.NewCTR(peer.Block, peer.IIV)
+
+	peer.IStream.XORKeyStream(payload, payload)
 
 	var seq [4]byte
 	binary.BigEndian.PutUint32(seq[:], peer.SeqIn)
@@ -178,6 +210,8 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 	check := data[:mac.Size()]
 
 	peer.SeqIn++
+
+	inc(peer.IIV)
 
 	if !bytes.Equal(om, check) {
 		return nil
