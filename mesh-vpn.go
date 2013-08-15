@@ -53,7 +53,9 @@ var ipArg = flag.String("ip", "", "IP to assign to device")
 var keyFile = flag.String("key", "", "Authenticate peers against contents of file")
 var verboseLevel = flag.Int("verbose", 1, "How verbose to be logging")
 
-func readPeers(peers Peers, conn *net.UDPConn, prune bool) {
+func readPeers(conn *net.UDPConn) Peers {
+	peers := make(Peers)
+
 	data, err := ioutil.ReadFile(*peersFile)
 
 	if err != nil {
@@ -83,6 +85,8 @@ func readPeers(peers Peers, conn *net.UDPConn, prune bool) {
 
 		peer.startNegotiate(conn)
 	}
+
+	return peers
 }
 
 func main() {
@@ -154,7 +158,7 @@ func main() {
 
 	Conn, err := net.ListenUDP("udp4", Addr)
 
-	peers := make(Peers)
+	var peers Peers
 
 	if len(*peerArg) > 0 {
 		addr, err := net.ResolveUDPAddr("udp4", *peerArg)
@@ -162,6 +166,8 @@ func main() {
 		if err != nil {
 			panic("Unable to resolve host")
 		}
+
+		peers = make(Peers)
 
 		peer := new(Peer)
 		peer.Conn = Conn
@@ -174,7 +180,9 @@ func main() {
 	}
 
 	if len(*peersFile) > 0 {
-		readPeers(peers, Conn, false)
+		peers = readPeers(Conn)
+	} else if peers == nil {
+		peers = make(Peers)
 	}
 
 	hupChannel := make(chan os.Signal, 1)
@@ -191,8 +199,10 @@ func main() {
 	for {
 		select {
 		case <-hupChannel:
-			Debugf(dInfo, "Reread peer list from file")
-			readPeers(peers, Conn, false)
+			if len(*peersFile) > 0 {
+				Debugf(dInfo, "Reread peer list from file")
+				peers = readPeers(Conn)
+			}
 
 		case frame := <-proc:
 
