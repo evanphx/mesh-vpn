@@ -9,11 +9,16 @@ import (
 )
 
 var Debug bool = false
+var DebugLevel int = -1
+
+const dInfo = 1
+const dConn = 2
+const dPacket = 5
 
 // Debug function, if the debug flag is set, then display. Do nothing otherwise
 // If Docker is in damon mode, also send the debug info on the socket
-func Debugf(format string, a ...interface{}) {
-	if Debug {
+func Debugf(level int, format string, a ...interface{}) {
+	if level <= DebugLevel {
 		// Retrieve the stack infos
 		_, file, line, ok := runtime.Caller(1)
 		if !ok {

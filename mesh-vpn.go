@@ -48,12 +48,17 @@ var peerArg = flag.String("peer", "", "peer to connect to")
 var peersFile = flag.String("peers", "", "file containing peers to connect to")
 var ipArg = flag.String("ip", "", "IP to assign to device")
 var keyFile = flag.String("key", "", "Authenticate peers against contents of file")
+var verboseLevel = flag.Int("verbose", 1, "How verbose to be logging")
 
 func main() {
 	flag.BoolVar(&Debug, "debug", false, "show debugging output")
 	flag.Parse()
 
-	Debugf("Debugging enabled")
+	if Debug {
+		DebugLevel = *verboseLevel
+	}
+
+	Debugf(dInfo, "Debugging enabled")
 
 	tun, err := tuntap.Open(*deviceName, tuntap.DevTap)
 	if err != nil {
@@ -149,7 +154,7 @@ func main() {
 				continue
 			}
 
-			Debugf("Starting peer '%s'", string(r))
+			Debugf(dConn, "Starting peer '%s'", string(r))
 			addr, err := net.ResolveUDPAddr("udp4", string(r))
 
 			if err != nil {
@@ -171,7 +176,7 @@ func main() {
 
 	routes := make(Routes)
 
-	Debugf("Processing frames...")
+	Debugf(dInfo, "Processing frames...")
 
 	for {
 		frame := <-proc
@@ -180,7 +185,7 @@ func main() {
 			peer, ok := peers[frame.From.String()]
 
 			if !ok {
-				Debugf("New peer!")
+				Debugf(dConn, "New peer!")
 				peer = new(Peer)
 				peer.Conn = Conn
 				peer.Addr = frame.From
@@ -189,7 +194,7 @@ func main() {
 				peers[frame.From.String()] = peer
 			}
 
-			Debugf("Received data from %s", peer.String())
+			Debugf(dPacket, "Received data from %s", peer.String())
 
 			switch frame.Data[0] {
 			case 0:
@@ -202,7 +207,7 @@ func main() {
 					peer.SentAuth = true
 					Conn.WriteMsgUDP(peer.makeAuth(keyData), nil, frame.From)
 				} else {
-					Debugf("No key data, peer %s auto-authenticated", peer.String())
+					Debugf(dInfo, "No key data, peer %s auto-authenticated", peer.String())
 					peer.Authenticated = true
 				}
 			case 1:
@@ -216,7 +221,7 @@ func main() {
 
 						if Debug {
 							if _, ok := routes[routeKey]; !ok {
-								Debugf("Peer %s now owns %s", peer.String(),
+								Debugf(dConn, "Peer %s now owns %s", peer.String(),
 									routeKey.String())
 							}
 						}
@@ -225,18 +230,18 @@ func main() {
 
 						dk := DestKey(data)
 
-						Debugf("Received packet for %s", dk.String())
+						Debugf(dPacket, "Received packet for %s", dk.String())
 
 						if bytes.Equal(dk[:], iface.HardwareAddr) {
-							Debugf("Sending packet for self to tap")
+							Debugf(dPacket, "Sending packet for self to tap")
 							tap.Send(data)
 						} else {
 							if opeer, ok := routes[dk]; ok {
-								Debugf("Re-routing incoming packet")
+								Debugf(dPacket, "Re-routing incoming packet")
 
 								opeer.Send(data)
 							} else {
-								Debugf("Flooding packet for unknown location")
+								Debugf(dPacket, "Flooding packet for unknown location")
 
 								tap.Send(data)
 
@@ -244,15 +249,15 @@ func main() {
 							}
 						}
 					} else {
-						Debugf("Too small packet detected")
+						Debugf(dInfo, "Too small packet detected")
 					}
 				} else {
-					Debugf("Failed to decrypt and authenticated packet")
+					Debugf(dInfo, "Failed to decrypt and authenticated packet")
 					sendGTFO(Conn, peer)
 				}
 			case 2:
 				// GTFO
-				Debugf("Received GTFO from %s, restarting peering", peer.String())
+				Debugf(dConn, "Received GTFO from %s, restarting peering", peer.String())
 				peer.PrivKey = nil
 				peer.Negotiated = false
 				peer.Authenticated = false
@@ -265,14 +270,14 @@ func main() {
 
 				if bytes.Equal(data, keyData) {
 					peer.Authenticated = true
-					Debugf("Peer %s authenticated", peer.String())
+					Debugf(dInfo, "Peer %s authenticated and mesh'd", peer.String())
 
 					if !peer.SentAuth {
 						peer.SentAuth = true
 						Conn.WriteMsgUDP(peer.makeAuth(keyData), nil, frame.From)
 					}
 				} else {
-					Debugf("Peer %s presented invalid auth data", peer.String())
+					Debugf(dInfo, "Peer %s presented invalid auth data", peer.String())
 				}
 			default:
 				fmt.Printf("Invalid command: %x\n", frame.Data[0])
@@ -282,7 +287,7 @@ func main() {
 			routingKey := frame.DestKey()
 
 			if peer, ok := routes[routingKey]; ok {
-				Debugf("Sending packet directly to %s", peer.String())
+				Debugf(dPacket, "Sending packet directly to %s", peer.String())
 				peer.Send(frame.Data)
 			} else {
 				peers.Flood(frame.Data, nil)

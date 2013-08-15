@@ -53,7 +53,7 @@ type negotiationData struct {
 }
 
 func (peer *Peer) startNegotiate(conn *net.UDPConn) {
-	Debugf("Sending nego to %s", peer.Addr.String())
+	Debugf(dConn, "Sending nego to %s", peer.Addr.String())
 
 	conn.WriteMsgUDP(peer.makeNegotiate(), nil, peer.Addr)
 
@@ -119,7 +119,7 @@ func inc(p []byte) {
 func (peer *Peer) readNegotiate(frame *Frame) bool {
 	var buf bytes.Buffer
 
-	Debugf("Reading nego...")
+	Debugf(dConn, "Reading nego...")
 
 	if peer.NegotiationTimer != nil {
 		peer.NegotiationTimer.Stop()
@@ -178,7 +178,7 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 	peer.SeqOut = 0
 
 	peer.Negotiated = true
-	Debugf("Peer %s negotiated", peer.String())
+	Debugf(dConn, "Peer %s negotiated", peer.String())
 
 	return reply
 }
@@ -224,7 +224,7 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 	check := data[:mac.Size()]
 
 	if !bytes.Equal(om, check) {
-		Debugf("HMAC failed!")
+		Debugf(dInfo, "HMAC failed with peer %s", peer.String())
 		return nil
 	}
 
@@ -232,7 +232,7 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 
 	if seq > peer.SeqIn {
 		if seq < peer.SeqIn+cWindow {
-			Debugf("Packet loss detected within window, winding (%d != %d)",
+			Debugf(dInfo, "Packet loss detected within window, winding (%d != %d)",
 				seq, peer.SeqIn)
 			for j := uint32(0); j < seq-peer.SeqIn; j++ {
 				inc(peer.IIV)
@@ -240,7 +240,7 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 
 			peer.SeqIn = seq
 		} else {
-			Debugf("Packet loss detected outside window!")
+			Debugf(dInfo, "Packet loss detected outside window!")
 			return nil
 		}
 	}
@@ -272,11 +272,11 @@ func (peer *Peer) Active() bool {
 type Peers map[string]*Peer
 
 func (peers Peers) Flood(data []byte, src *Peer) {
-	Debugf("Flooding data to peers")
+	Debugf(dPacket, "Flooding data to peers")
 
 	for _, peer := range peers {
 		if peer != src && peer.Active() {
-			Debugf("Flooding data to %s", peer.String())
+			Debugf(dPacket, "Flooding data to %s", peer.String())
 			peer.Send(data)
 		}
 	}

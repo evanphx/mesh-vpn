@@ -24,6 +24,11 @@ Vagrant.configure("2") do |config|
     app.vm.network :private_network, ip: "172.16.8.2"
   end
 
+  config.vm.define :chuck do |app|
+    app.vm.box = "precise64"
+    app.vm.network :private_network, ip: "172.16.8.4"
+  end
+
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine. In the example below,
   # accessing "localhost:8080" will access port 80 on the guest machine.
