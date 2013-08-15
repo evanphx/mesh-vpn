@@ -21,6 +21,10 @@ type Peer struct {
 
 	NegotiationTimer *time.Timer
 	Negotiated       bool
+	SentNego         bool
+
+	Authenticated bool
+	SentAuth      bool
 
 	PrivKey *dh.PrivateKey
 	PubKey  *dh.SlimPublicKey
@@ -49,6 +53,8 @@ func (peer *Peer) startNegotiate(conn *net.UDPConn) {
 	Debugf("Sending nego to %s", peer.Addr.String())
 
 	conn.WriteMsgUDP(peer.makeNegotiate(), nil, peer.Addr)
+
+	peer.SentNego = true
 
 	d := time.Second * 3
 
@@ -85,6 +91,10 @@ func (peer *Peer) makeNegotiate() []byte {
 	}
 
 	return buf.Bytes()
+}
+
+func (peer *Peer) makeAuth(auth []byte) []byte {
+	return peer.Encrypt(auth, 3)
 }
 
 func dup(p []byte) []byte {
@@ -138,6 +148,12 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 		reply = true
 	}
 
+	// If we were already negotiated, then we're doing a re-nego, so
+	// reply.
+	if peer.Negotiated {
+		reply = true
+	}
+
 	peer.PubKey = &data.Key
 	peer.Secret = peer.PubKey.ComputeSecret(peer.PrivKey)
 	peer.Key = peer.Secret.DeriveKey(sha256.New, 32, keyInfo)
@@ -164,9 +180,9 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 	return reply
 }
 
-func (peer *Peer) Encrypt(src []byte) []byte {
+func (peer *Peer) Encrypt(src []byte, cmd byte) []byte {
 	dst := make([]byte, 1+peer.MacLen+4+len(src))
-	dst[0] = 1
+	dst[0] = cmd
 
 	payload := dst[1+peer.MacLen:]
 
@@ -213,7 +229,8 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 
 	if seq > peer.SeqIn {
 		if seq < peer.SeqIn+cWindow {
-			Debugf("Packet loss detected within window, winding")
+			Debugf("Packet loss detected within window, winding (%d != %d)",
+				seq, peer.SeqIn)
 			for j := uint32(0); j < seq-peer.SeqIn; j++ {
 				inc(peer.IIV)
 			}

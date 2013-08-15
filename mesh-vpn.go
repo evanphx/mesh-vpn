@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"code.google.com/p/tuntap"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os/exec"
 )
@@ -45,6 +47,7 @@ var macInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-mac")
 var deviceName = flag.String("device", "tap0", "device name to create")
 var peerArg = flag.String("peer", "", "peer to connect to")
 var ipArg = flag.String("ip", "", "IP to assign to device")
+var keyFile = flag.String("key", "", "Authenticate peers against contents of file")
 
 func main() {
 	flag.BoolVar(&Debug, "debug", false, "show debugging output")
@@ -76,6 +79,12 @@ func main() {
 		fmt.Printf("Listening on %s as %s\n", tun.Name(), *ipArg)
 	} else {
 		fmt.Println("Listening on", tun.Name())
+	}
+
+	var keyData []byte
+
+	if len(*keyFile) > 0 {
+		keyData, err = ioutil.ReadFile(*keyFile)
 	}
 
 	proc := make(chan *Frame)
@@ -135,6 +144,14 @@ func main() {
 				if peer.readNegotiate(frame) {
 					Conn.WriteMsgUDP(peer.makeNegotiate(), nil, frame.From)
 				}
+
+				if len(keyData) > 0 {
+					peer.SentAuth = true
+					Conn.WriteMsgUDP(peer.makeAuth(keyData), nil, frame.From)
+				} else {
+					Debugf("No key data, peer %s auto-authenticated", peer.String())
+					peer.Authenticated = true
+				}
 			case 1:
 				// Data
 
@@ -168,8 +185,25 @@ func main() {
 				Debugf("Received GTFO from %s, restarting peering", peer.String())
 				peer.PrivKey = nil
 				peer.Negotiated = false
+				peer.Authenticated = false
 				peer.startNegotiate(Conn)
 
+			case 3:
+				// Auth
+
+				data := peer.Decrypt(frame.Data[1:])
+
+				if bytes.Equal(data, keyData) {
+					peer.Authenticated = true
+					Debugf("Peer %s authenticated", peer.String())
+
+					if !peer.SentAuth {
+						peer.SentAuth = true
+						Conn.WriteMsgUDP(peer.makeAuth(keyData), nil, frame.From)
+					}
+				} else {
+					Debugf("Peer %s presented invalid auth data", peer.String())
+				}
 			default:
 				fmt.Printf("Invalid command: %x\n", frame.Data[0])
 			}
@@ -178,14 +212,14 @@ func main() {
 			routingKey := frame.DestKey()
 
 			if peer, ok := routes[routingKey]; ok {
-				Conn.WriteMsgUDP(peer.Encrypt(frame.Data), nil, peer.Addr)
+				Conn.WriteMsgUDP(peer.Encrypt(frame.Data, 1), nil, peer.Addr)
 			} else {
 				for _, peer := range peers {
-					if !peer.Negotiated {
+					if !peer.Authenticated {
 						continue
 					}
 
-					Conn.WriteMsgUDP(peer.Encrypt(frame.Data), nil, peer.Addr)
+					Conn.WriteMsgUDP(peer.Encrypt(frame.Data, 1), nil, peer.Addr)
 				}
 			}
 		}
