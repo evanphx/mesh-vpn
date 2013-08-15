@@ -46,6 +46,7 @@ var macInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-mac")
 
 var deviceName = flag.String("device", "tap0", "device name to create")
 var peerArg = flag.String("peer", "", "peer to connect to")
+var peersFile = flag.String("peers", "", "file containing peers to connect to")
 var ipArg = flag.String("ip", "", "IP to assign to device")
 var keyFile = flag.String("key", "", "Authenticate peers against contents of file")
 
@@ -115,6 +116,37 @@ func main() {
 		peers[addr.String()] = peer
 
 		peer.startNegotiate(Conn)
+	}
+
+	if len(*peersFile) > 0 {
+		data, err := ioutil.ReadFile(*peersFile)
+
+		if err != nil {
+			panic(err)
+		}
+
+		lines := bytes.Split(data, []byte("\n"))
+
+		for _, r := range lines {
+			if len(r) == 0 {
+				continue
+			}
+
+			Debugf("Starting peer '%s'", string(r))
+			addr, err := net.ResolveUDPAddr("udp4", string(r))
+
+			if err != nil {
+				panic("Unable to resolve host")
+			}
+
+			peer := new(Peer)
+			peer.Addr = addr
+			peer.Negotiated = false
+
+			peers[addr.String()] = peer
+
+			peer.startNegotiate(Conn)
+		}
 	}
 
 	go ReadDevice(tun, proc)
