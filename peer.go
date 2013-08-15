@@ -17,7 +17,10 @@ import (
 var defaultGroup = dh.Group14
 
 type Peer struct {
+	Conn *net.UDPConn
 	Addr *net.UDPAddr
+
+	RouteKey RouteKey
 
 	NegotiationTimer *time.Timer
 	Negotiated       bool
@@ -30,9 +33,9 @@ type Peer struct {
 	PubKey  *dh.SlimPublicKey
 	Secret  *dh.Secret
 
-	Key, IV []byte
-	MacKey  []byte
-	MacLen  int
+	CryptoKey, CryptoIV []byte
+	MacKey              []byte
+	MacLen              int
 
 	Block cipher.Block
 
@@ -156,20 +159,20 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 
 	peer.PubKey = &data.Key
 	peer.Secret = peer.PubKey.ComputeSecret(peer.PrivKey)
-	peer.Key = peer.Secret.DeriveKey(sha256.New, 32, keyInfo)
+	peer.CryptoKey = peer.Secret.DeriveKey(sha256.New, 32, keyInfo)
 	peer.MacLen = sha256.New().Size()
 	peer.MacKey = peer.Secret.DeriveKey(sha256.New, peer.MacLen, macInfo)
 
-	peer.Block, err = aes.NewCipher(peer.Key)
+	peer.Block, err = aes.NewCipher(peer.CryptoKey)
 
 	if err != nil {
 		panic(err)
 	}
 
-	peer.IV = peer.Secret.DeriveKey(sha256.New, peer.Block.BlockSize(), IVkeyInfo)
+	peer.CryptoIV = peer.Secret.DeriveKey(sha256.New, peer.Block.BlockSize(), IVkeyInfo)
 
-	peer.IIV = dup(peer.IV)
-	peer.OIV = dup(peer.IV)
+	peer.IIV = dup(peer.CryptoIV)
+	peer.OIV = dup(peer.CryptoIV)
 
 	peer.SeqIn = 0
 	peer.SeqOut = 0
@@ -251,4 +254,30 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 	inc(peer.IIV)
 
 	return payload[4:]
+}
+
+func (peer *Peer) Send(data []byte) error {
+	peer.Conn.WriteMsgUDP(peer.Encrypt(data, 1), nil, peer.Addr)
+	return nil
+}
+
+func (peer *Peer) Key() RouteKey {
+	return peer.RouteKey
+}
+
+func (peer *Peer) Active() bool {
+	return peer.Authenticated
+}
+
+type Peers map[string]*Peer
+
+func (peers Peers) Flood(data []byte, src *Peer) {
+	Debugf("Flooding data to peers")
+
+	for _, peer := range peers {
+		if peer != src && peer.Active() {
+			Debugf("Flooding data to %s", peer.String())
+			peer.Send(data)
+		}
+	}
 }

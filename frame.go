@@ -43,6 +43,13 @@ func (frame *Frame) DestKey() RouteKey {
 	return (RouteKey)(key)
 }
 
+func DestKey(data []byte) RouteKey {
+	var key [6]byte
+	copy(key[:], data[0:6])
+
+	return (RouteKey)(key)
+}
+
 func SrcKey(data []byte) RouteKey {
 	var key [6]byte
 	copy(key[:], data[6:12])

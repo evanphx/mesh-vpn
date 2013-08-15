@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
 
 var Debug bool = false
@@ -22,6 +23,8 @@ func Debugf(format string, a ...interface{}) {
 			file = file[strings.LastIndex(file, "/")+1:]
 		}
 
-		fmt.Fprintf(os.Stderr, fmt.Sprintf("[debug] %s:%d %s\n", file, line, format), a...)
+		n := time.Now()
+
+		fmt.Fprintf(os.Stderr, fmt.Sprintf("[debug] %d %s:%d %s\n", n.Unix(), file, line, format), a...)
 	}
 }

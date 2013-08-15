@@ -10,7 +10,6 @@ import (
 	"os/exec"
 )
 
-type Peers map[string]*Peer
 type Routes map[RouteKey]*Peer
 
 func ReadUDP(conn *net.UDPConn, proc chan *Frame) {
@@ -82,6 +81,23 @@ func main() {
 		fmt.Println("Listening on", tun.Name())
 	}
 
+	iface, err := net.InterfaceByName(*deviceName)
+
+	if err != nil {
+		ifaces, err := net.Interfaces()
+
+		for _, i := range ifaces {
+			fmt.Printf("%d: %s %s\n", i.Index, i.Name, i.HardwareAddr.String())
+		}
+
+		panic(fmt.Sprintf("Error opening '%s': %s", tun.Name(), err))
+	}
+
+	var localKey RouteKey
+	copy(localKey[:], iface.HardwareAddr)
+
+	tap := TapConsumer{tun, localKey}
+
 	var keyData []byte
 
 	if len(*keyFile) > 0 {
@@ -110,6 +126,7 @@ func main() {
 		}
 
 		peer := new(Peer)
+		peer.Conn = Conn
 		peer.Addr = addr
 		peer.Negotiated = false
 
@@ -140,6 +157,7 @@ func main() {
 			}
 
 			peer := new(Peer)
+			peer.Conn = Conn
 			peer.Addr = addr
 			peer.Negotiated = false
 
@@ -164,11 +182,14 @@ func main() {
 			if !ok {
 				Debugf("New peer!")
 				peer = new(Peer)
+				peer.Conn = Conn
 				peer.Addr = frame.From
 				peer.Negotiated = false
 
 				peers[frame.From.String()] = peer
 			}
+
+			Debugf("Received data from %s", peer.String())
 
 			switch frame.Data[0] {
 			case 0:
@@ -187,15 +208,12 @@ func main() {
 			case 1:
 				// Data
 
-				pkt := tuntap.Packet{}
-				pkt.Protocol = 0x8000
-				pkt.Truncated = false
+				data := peer.Decrypt(frame.Data[1:])
 
-				pkt.Packet = peer.Decrypt(frame.Data[1:])
+				if data != nil {
+					if len(data) >= 14 {
+						routeKey := SrcKey(data)
 
-				if pkt.Packet != nil {
-					if len(pkt.Packet) >= 14 {
-						routeKey := SrcKey(pkt.Packet)
 						if Debug {
 							if _, ok := routes[routeKey]; !ok {
 								Debugf("Peer %s now owns %s", peer.String(),
@@ -204,7 +222,27 @@ func main() {
 						}
 
 						routes[routeKey] = peer
-						tun.WritePacket(&pkt)
+
+						dk := DestKey(data)
+
+						Debugf("Received packet for %s", dk.String())
+
+						if bytes.Equal(dk[:], iface.HardwareAddr) {
+							Debugf("Sending packet for self to tap")
+							tap.Send(data)
+						} else {
+							if opeer, ok := routes[dk]; ok {
+								Debugf("Re-routing incoming packet")
+
+								opeer.Send(data)
+							} else {
+								Debugf("Flooding packet for unknown location")
+
+								tap.Send(data)
+
+								peers.Flood(data, peer)
+							}
+						}
 					} else {
 						Debugf("Too small packet detected")
 					}
@@ -244,15 +282,10 @@ func main() {
 			routingKey := frame.DestKey()
 
 			if peer, ok := routes[routingKey]; ok {
-				Conn.WriteMsgUDP(peer.Encrypt(frame.Data, 1), nil, peer.Addr)
+				Debugf("Sending packet directly to %s", peer.String())
+				peer.Send(frame.Data)
 			} else {
-				for _, peer := range peers {
-					if !peer.Authenticated {
-						continue
-					}
-
-					Conn.WriteMsgUDP(peer.Encrypt(frame.Data, 1), nil, peer.Addr)
-				}
+				peers.Flood(frame.Data, nil)
 			}
 		}
 	}
