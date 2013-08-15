@@ -29,6 +29,15 @@ func ReadDevice(tun *tuntap.Interface, proc chan *Frame) {
 	}
 }
 
+func sendGTFO(conn *net.UDPConn, peer *Peer) {
+	peer.PrivKey = nil
+
+	var buf [1]byte
+	buf[0] = 2
+
+	conn.WriteMsgUDP(buf[:], nil, peer.Addr)
+}
+
 var keyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn")
 var IVkeyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-IV")
 var macInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-mac")
@@ -152,7 +161,15 @@ func main() {
 					}
 				} else {
 					Debugf("Failed to decrypt and authenticated packet")
+					sendGTFO(Conn, peer)
 				}
+			case 2:
+				// GTFO
+				Debugf("Received GTFO from %s, restarting peering", peer.String())
+				peer.PrivKey = nil
+				peer.Negotiated = false
+				peer.startNegotiate(Conn)
+
 			default:
 				fmt.Printf("Invalid command: %x\n", frame.Data[0])
 			}

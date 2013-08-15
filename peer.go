@@ -155,7 +155,11 @@ func (peer *Peer) readNegotiate(frame *Frame) bool {
 	peer.IIV = dup(peer.IV)
 	peer.OIV = dup(peer.IV)
 
+	peer.SeqIn = 0
+	peer.SeqOut = 0
+
 	peer.Negotiated = true
+	Debugf("Peer %s negotiated", peer.String())
 
 	return reply
 }
@@ -187,6 +191,8 @@ func (peer *Peer) Encrypt(src []byte) []byte {
 	return dst
 }
 
+const cWindow = 10
+
 func (peer *Peer) Decrypt(data []byte) []byte {
 	mac := hmac.New(sha256.New, peer.MacKey)
 
@@ -205,10 +211,8 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 
 	seq := binary.BigEndian.Uint32(payload)
 
-	Debugf("pseq: %d, iseq: %d", seq, peer.SeqIn)
-
 	if seq > peer.SeqIn {
-		if seq < peer.SeqIn+10 {
+		if seq < peer.SeqIn+cWindow {
 			Debugf("Packet loss detected within window, winding")
 			for j := uint32(0); j < seq-peer.SeqIn; j++ {
 				inc(peer.IIV)
@@ -217,6 +221,7 @@ func (peer *Peer) Decrypt(data []byte) []byte {
 			peer.SeqIn = seq
 		} else {
 			Debugf("Packet loss detected outside window!")
+			return nil
 		}
 	}
 
