@@ -65,7 +65,7 @@ var PingTimer = 10
 func (peer *Peer) startNegotiate(conn *net.UDPConn) {
 	Debugf(dConn, "Sending nego to %s", peer.Addr.String())
 
-	conn.WriteMsgUDP(peer.makeNegotiate(), nil, peer.Addr)
+	peer.sendNegotiate()
 
 	peer.SentNego = true
 
@@ -118,7 +118,7 @@ func (peer *Peer) stopPingTimer() {
 	}
 }
 
-func (peer *Peer) makeNegotiate() []byte {
+func (peer *Peer) sendNegotiate() {
 	var buf bytes.Buffer
 
 	_, err := buf.Write([]byte{0})
@@ -145,11 +145,13 @@ func (peer *Peer) makeNegotiate() []byte {
 		panic(err)
 	}
 
-	return buf.Bytes()
+	peer.Conn.WriteMsgUDP(buf.Bytes(), nil, peer.Addr)
 }
 
-func (peer *Peer) makeAuth(auth []byte) []byte {
-	return peer.Encrypt(auth, 3)
+func (peer *Peer) sendAuth(auth []byte) {
+	peer.SentAuth = true
+	buf := peer.Encrypt(auth, 3)
+	peer.Conn.WriteMsgUDP(buf, nil, peer.Addr)
 }
 
 func dup(p []byte) []byte {
