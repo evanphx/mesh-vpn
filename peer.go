@@ -17,6 +17,8 @@ import (
 var defaultGroup = dh.Group14
 
 type Peer struct {
+	Initiated bool
+
 	Conn *net.UDPConn
 	Addr *net.UDPAddr
 
@@ -42,6 +44,12 @@ type Peer struct {
 	IIV, OIV []byte
 
 	SeqIn, SeqOut uint32
+
+	PacketsRecv uint64
+
+	PingChecked uint64
+	PingTimer   *time.Timer
+	PingsMissed uint32
 }
 
 func (peer *Peer) String() string {
@@ -51,6 +59,8 @@ func (peer *Peer) String() string {
 type negotiationData struct {
 	Key dh.SlimPublicKey
 }
+
+var PingTimer = 10
 
 func (peer *Peer) startNegotiate(conn *net.UDPConn) {
 	Debugf(dConn, "Sending nego to %s", peer.Addr.String())
@@ -64,6 +74,48 @@ func (peer *Peer) startNegotiate(conn *net.UDPConn) {
 	peer.NegotiationTimer = time.AfterFunc(d, func() {
 		peer.startNegotiate(conn)
 	})
+}
+
+func (peer *Peer) startPingTimer(dead chan *Peer) {
+	d := time.Second * time.Duration(PingTimer)
+
+	peer.PingTimer = time.AfterFunc(d, func() {
+		peer.checkPing(dead)
+	})
+
+	Debugf(dPacket, "Ping timer started for %s", peer.String())
+}
+
+func (peer *Peer) checkPing(dead chan *Peer) {
+	// If we haven't gotten any packets, since last we checked, make some
+	if peer.PacketsRecv == peer.PingChecked {
+		if peer.PingsMissed < 3 {
+			peer.PingsMissed++
+
+			Debugf(dPacket, "Sending ping to %s. %d, %d, %d", peer.String(),
+				peer.PacketsRecv, peer.PingChecked, peer.PingsMissed)
+
+			peer.Conn.WriteMsgUDP(peer.Encrypt(cPingData, 4), nil, peer.Addr)
+			peer.startPingTimer(dead)
+		} else {
+			peer.PingTimer = nil
+			dead <- peer
+		}
+	} else {
+		Debugf(dPacket, "No need to send ping to %s", peer.String())
+
+		peer.PingsMissed = 0
+		peer.PingChecked = peer.PacketsRecv
+
+		peer.startPingTimer(dead)
+	}
+}
+
+func (peer *Peer) stopPingTimer() {
+	if peer.PingTimer != nil {
+		peer.PingTimer.Stop()
+		peer.PingTimer = nil
+	}
 }
 
 func (peer *Peer) makeNegotiate() []byte {

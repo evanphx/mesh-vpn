@@ -13,7 +13,9 @@ import (
 	"syscall"
 )
 
-type Routes map[RouteKey]*Peer
+type RouteMap map[RouteKey]*Peer
+
+var Routes RouteMap
 
 func ReadUDP(conn *net.UDPConn, proc chan *Frame) {
 	for {
@@ -33,6 +35,20 @@ func ReadDevice(tun *tuntap.Interface, proc chan *Frame) {
 	}
 }
 
+func pruneRoutes(routes RouteMap, peer *Peer) {
+	var toRemove []RouteKey
+
+	for key, tpeer := range routes {
+		if peer == tpeer {
+			toRemove = append(toRemove, key)
+		}
+	}
+
+	for _, key := range toRemove {
+		delete(routes, key)
+	}
+}
+
 func sendGTFO(conn *net.UDPConn, peer *Peer) {
 	peer.PrivKey = nil
 
@@ -41,6 +57,8 @@ func sendGTFO(conn *net.UDPConn, peer *Peer) {
 
 	conn.WriteMsgUDP(buf[:], nil, peer.Addr)
 }
+
+var cPingData = []byte("mesh-vpn ping data")
 
 var keyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn")
 var IVkeyInfo = []byte("diffie-hellman-group14-sha256-mesh-vpn-IV")
@@ -52,6 +70,15 @@ var peersFile = flag.String("peers", "", "file containing peers to connect to")
 var ipArg = flag.String("ip", "", "IP to assign to device")
 var keyFile = flag.String("key", "", "Authenticate peers against contents of file")
 var verboseLevel = flag.Int("verbose", 1, "How verbose to be logging")
+var pingTimerOpt = flag.Int("ping", 10, "How often to ping peers to keep current")
+
+func stopAllTimers(peers Peers) {
+	for _, peer := range peers {
+		pruneRoutes(Routes, peer)
+
+		peer.stopPingTimer()
+	}
+}
 
 func readPeers(conn *net.UDPConn) Peers {
 	peers := make(Peers)
@@ -77,6 +104,7 @@ func readPeers(conn *net.UDPConn) Peers {
 		}
 
 		peer := new(Peer)
+		peer.Initiated = true
 		peer.Conn = conn
 		peer.Addr = addr
 		peer.Negotiated = false
@@ -98,6 +126,8 @@ func main() {
 	}
 
 	Debugf(dInfo, "Debugging enabled")
+
+	PingTimer = *pingTimerOpt
 
 	tun, err := tuntap.Open(*deviceName, tuntap.DevTap)
 	if err != nil {
@@ -170,6 +200,7 @@ func main() {
 		peers = make(Peers)
 
 		peer := new(Peer)
+		peer.Initiated = true
 		peer.Conn = Conn
 		peer.Addr = addr
 		peer.Negotiated = false
@@ -188,11 +219,13 @@ func main() {
 	hupChannel := make(chan os.Signal, 1)
 	signal.Notify(hupChannel, syscall.SIGHUP)
 
+	deadChannel := make(chan *Peer)
+
 	go ReadUDP(Conn, proc)
 
 	go ReadDevice(tun, proc)
 
-	routes := make(Routes)
+	Routes = make(RouteMap)
 
 	Debugf(dInfo, "Processing frames...")
 
@@ -201,7 +234,25 @@ func main() {
 		case <-hupChannel:
 			if len(*peersFile) > 0 {
 				Debugf(dInfo, "Reread peer list from file")
+				stopAllTimers(peers)
 				peers = readPeers(Conn)
+			}
+
+		case peer := <-deadChannel:
+			if peer.Initiated {
+				Debugf(dInfo, "Detecte %s as dead peer, starting nego", peer.String())
+
+				pruneRoutes(Routes, peer)
+
+				peer.PrivKey = nil
+				peer.Negotiated = false
+				peer.Authenticated = false
+				peer.startNegotiate(Conn)
+			} else {
+				Debugf(dInfo, "Detected %s as a dead peer, removing", peer.String())
+
+				sendGTFO(Conn, peer)
+				delete(peers, peer.Addr.String())
 			}
 
 		case frame := <-proc:
@@ -219,6 +270,8 @@ func main() {
 					peers[frame.From.String()] = peer
 				}
 
+				peer.PacketsRecv++
+
 				Debugf(dPacket, "Received data from %s", peer.String())
 
 				switch frame.Data[0] {
@@ -234,9 +287,16 @@ func main() {
 					} else {
 						Debugf(dInfo, "No key data, peer %s auto-authenticated", peer.String())
 						peer.Authenticated = true
+						peer.startPingTimer(deadChannel)
 					}
 				case 1:
 					// Data
+
+					if !peer.Authenticated {
+						Debugf(dInfo, "Peer %s sent data without authentication", peer.String())
+						sendGTFO(Conn, peer)
+						continue
+					}
 
 					data := peer.Decrypt(frame.Data[1:])
 
@@ -245,13 +305,13 @@ func main() {
 							routeKey := SrcKey(data)
 
 							if Debug {
-								if _, ok := routes[routeKey]; !ok {
+								if _, ok := Routes[routeKey]; !ok {
 									Debugf(dConn, "Peer %s now owns %s", peer.String(),
 										routeKey.String())
 								}
 							}
 
-							routes[routeKey] = peer
+							Routes[routeKey] = peer
 
 							dk := DestKey(data)
 
@@ -261,7 +321,7 @@ func main() {
 								Debugf(dPacket, "Sending packet for self to tap")
 								tap.Send(data)
 							} else {
-								if opeer, ok := routes[dk]; ok {
+								if opeer, ok := Routes[dk]; ok {
 									Debugf(dPacket, "Re-routing incoming packet")
 
 									opeer.Send(data)
@@ -283,9 +343,12 @@ func main() {
 				case 2:
 					// GTFO
 					Debugf(dConn, "Received GTFO from %s, restarting peering", peer.String())
+					pruneRoutes(Routes, peer)
+
 					peer.PrivKey = nil
 					peer.Negotiated = false
 					peer.Authenticated = false
+					peer.stopPingTimer()
 					peer.startNegotiate(Conn)
 
 				case 3:
@@ -293,8 +356,12 @@ func main() {
 
 					data := peer.Decrypt(frame.Data[1:])
 
-					if bytes.Equal(data, keyData) {
+					if data == nil {
+						Debugf(dInfo, "Auth with %s failed decryption", peer.String())
+						sendGTFO(Conn, peer)
+					} else if bytes.Equal(data, keyData) {
 						peer.Authenticated = true
+						peer.startPingTimer(deadChannel)
 						Debugf(dInfo, "Peer %s authenticated and mesh'd", peer.String())
 
 						if !peer.SentAuth {
@@ -302,8 +369,40 @@ func main() {
 							Conn.WriteMsgUDP(peer.makeAuth(keyData), nil, frame.From)
 						}
 					} else {
+						Debugf(dPacket, "auth: %x, need: %x", data, keyData)
 						Debugf(dInfo, "Peer %s presented invalid auth data", peer.String())
+						sendGTFO(Conn, peer)
 					}
+				case 4:
+					// Ping
+
+					data := peer.Decrypt(frame.Data[1:])
+
+					if data == nil {
+						Debugf(dInfo, "Ping failed decryption")
+						sendGTFO(Conn, peer)
+					} else if bytes.Equal(data, cPingData) {
+						Debugf(dPacket, "Ping checked successfully")
+					} else {
+						Debugf(dPacket, "Ping failed to decrypt")
+					}
+
+					Conn.WriteMsgUDP(peer.Encrypt(cPingData, 5), nil, frame.From)
+
+				case 5:
+					// Pong
+
+					data := peer.Decrypt(frame.Data[1:])
+
+					if data == nil {
+						Debugf(dInfo, "Pong failed decryption")
+						sendGTFO(Conn, peer)
+					} else if bytes.Equal(data, cPingData) {
+						Debugf(dPacket, "Pong checked successfully")
+					} else {
+						Debugf(dPacket, "Pong failed to decrypt")
+					}
+
 				default:
 					fmt.Printf("Invalid command: %x\n", frame.Data[0])
 				}
@@ -311,7 +410,7 @@ func main() {
 			} else if len(peers) > 0 {
 				routingKey := frame.DestKey()
 
-				if peer, ok := routes[routingKey]; ok {
+				if peer, ok := Routes[routingKey]; ok {
 					Debugf(dPacket, "Sending packet directly to %s", peer.String())
 					peer.Send(frame.Data)
 				} else {
